@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import gspread
@@ -100,7 +101,7 @@ def find_col(df: pd.DataFrame, name: str) -> Optional[str]:
             return c
     return None
 
-# alias para evitar confusión con los bloques del planner
+# alias para planner
 def _find_col(df, name: str) -> Optional[str]:
     return find_col(df, name)
 
@@ -126,7 +127,7 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     return "torta" if 2 <= nunique <= 6 else "barras"
 
 # ---------------------------
-# VISUALIZACIONES (EXCEL-LIKE)
+# VISUALIZACIONES (EXCEL-LIKE) — robustas
 # ---------------------------
 def _fmt_miles(x, pos=None):
     try:
@@ -135,7 +136,13 @@ def _fmt_miles(x, pos=None):
         return str(x)
 
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
-    resumen = df.groupby(col_categoria, dropna=False)[col_valor].sum().sort_values(ascending=False)
+    vals = pd.to_numeric(df[col_valor], errors="coerce")
+    resumen = (
+        df.assign(__v=vals)
+          .groupby(col_categoria, dropna=False)["__v"]
+          .sum()
+          .sort_values(ascending=False)
+    )
     fig, ax = plt.subplots()
     ax.pie(resumen.values, labels=[str(x) for x in resumen.index], autopct='%1.1f%%', startangle=90)
     ax.axis('equal')
@@ -143,22 +150,43 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     st.pyplot(fig)
 
 def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None):
-    resumen = df.groupby(col_categoria, dropna=False)[col_valor].sum().sort_values(ascending=False)
+    vals = pd.to_numeric(df[col_valor], errors="coerce")
+    resumen = (
+        df.assign(__v=vals)
+          .groupby(col_categoria, dropna=False)["__v"]
+          .sum()
+          .sort_values(ascending=False)
+    )
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     ax.set_ylabel(col_valor)
     ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_miles))
-    ax.tick_params(axis='x', rotation=45, ha='right')
+    ax.tick_params(axis='x', rotation=45)  # sin 'ha'
+    for lbl in ax.get_xticklabels():
+        lbl.set_ha('right')
     for b in bars:
-        ax.annotate(_fmt_miles(b.get_height()), xy=(b.get_x()+b.get_width()/2, b.get_height()),
-                    xytext=(0, 3), textcoords="offset points", ha='center', va='bottom', fontsize=8)
+        y = b.get_height()
+        if np.isfinite(y):
+            ax.annotate(
+                _fmt_miles(y),
+                xy=(b.get_x()+b.get_width()/2, y),
+                xytext=(0, 3),
+                textcoords="offset points",
+                ha='center', va='bottom', fontsize=8
+            )
     fig.tight_layout()
     st.pyplot(fig)
 
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
-    resumen = (df.groupby(col_categoria, dropna=False)[col_valor]
-                 .sum().sort_values(ascending=False).reset_index())
+    vals = pd.to_numeric(df[col_valor], errors="coerce")
+    resumen = (
+        df.assign(__v=vals)
+          .groupby(col_categoria, dropna=False)["__v"]
+          .sum()
+          .sort_values(ascending=False)
+          .reset_index()
+    )
     resumen.columns = [str(col_categoria).title(), str(col_valor).title()]
     col_val = resumen.columns[1]
     try:
@@ -295,7 +323,6 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
         return False
 
     if action == "text":
-        # Nada que renderizar; la IA responderá en texto
         return False
 
     sheet = plan.get("sheet") or ""
@@ -312,17 +339,14 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
         if df is None or df.empty:
             continue
 
-        # Resolver columnas robustamente
         cat_real  = _find_col(df, cat)  if cat  else None
         val_real  = _find_col(df, val)  if val  else None
         date_real = _find_col(df, date_col) if date_col else None
 
-        # Intentar parsear fecha si corresponde
         if date_real:
             df = df.copy()
             df[date_real] = pd.to_datetime(df[date_real], errors="coerce")
 
-        # Autodetección si faltan columnas
         if not val_real:
             for c in df.columns:
                 if any(k in _norm(c) for k in ["monto","importe","neto","total","facturacion","ingreso","venta"]):
@@ -332,19 +356,14 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
                 if any(k in _norm(c) for k in ["fecha","mes","patente","cliente","tipo","estado","proceso","servicio","vehiculo","unidad"]):
                     cat_real = c; break
 
-        # Último intento: usar nombres crudos si existen
         if not cat_real and cat in df.columns: cat_real = cat
         if not val_real and val in df.columns: val_real = val
-
-        # Si no están ambas, probar otra hoja
         if not val_real or not cat_real or cat_real not in df.columns or val_real not in df.columns:
             continue
 
-        # Elegir tipo de gráfico si es automático
         if action == "chart" and chart == "auto":
             chart = _choose_chart_auto(df, cat_real, val_real)
 
-        # Ejecutar
         if action == "table":
             mostrar_tabla(df, cat_real, val_real, title)
             st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type": "tabla"}
@@ -356,7 +375,6 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
             elif chart == "torta":
                 mostrar_grafico_torta(df, cat_real, val_real, title)
             elif chart == "linea":
-                # Serie temporal → agregamos por mes; si no es fecha, caemos a barras
                 df2 = df.copy()
                 if not pd.api.types.is_datetime64_any_dtype(df2[cat_real]):
                     try:
@@ -380,7 +398,6 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
                 else:
                     mostrar_grafico_barras(df, cat_real, val_real, title)
             else:
-                # Fallback seguro
                 mostrar_grafico_barras(df, cat_real, val_real, title)
 
             st.session_state["__ultima_vista__"] = {"sheet": h, "cat": cat_real, "val": val_real, "type": f"chart:{chart}"}
@@ -432,7 +449,11 @@ with col3:
         pregunta = st.text_area("Pregunta")
 
         if st.button("📊 Análisis General Automático"):
-            analisis = analizar_datos_taller(st.session_state.data)
+            try:
+                analisis = analizar_datos_taller(st.session_state.data)
+            except Exception as e:
+                st.warning(f"⚠️ Hubo un problema al calcular el análisis automático: {e}")
+                analisis = {}
             texto_analisis = json.dumps(analisis, indent=2, ensure_ascii=False)
             prompt = f"""
 Eres un controller financiero senior.
@@ -452,7 +473,7 @@ Datos calculados:
             parse_and_render_instructions(respuesta, st.session_state.data)
 
         if st.button("Responder") and pregunta:
-            # Atajos de continuidad (según la última vista)
+            # Atajos de continuidad (última vista)
             if any(k in _norm(pregunta) for k in ["ahora","segun lo anterior","según lo anterior","mismo","misma","anterior"]):
                 last = st.session_state.get("__ultima_vista__")
                 if last:
@@ -471,7 +492,11 @@ Datos calculados:
                 executed = execute_plan(plan, st.session_state.data)
 
             if not executed:
-                analisis = analizar_datos_taller(st.session_state.data)
+                try:
+                    analisis = analizar_datos_taller(st.session_state.data)
+                except Exception as e:
+                    st.warning(f"⚠️ Hubo un problema al calcular el análisis automático: {e}")
+                    analisis = {}
                 texto_analisis = json.dumps(analisis, indent=2, ensure_ascii=False)
                 prompt = f"""
 Actúa como controller financiero senior. Responde a la pregunta.
