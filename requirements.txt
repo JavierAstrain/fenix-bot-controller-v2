@@ -1,0 +1,6 @@
+streamlit
+pandas
+matplotlib
+gspread
+openai
+google-auth
