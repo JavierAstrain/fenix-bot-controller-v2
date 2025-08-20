@@ -51,6 +51,11 @@ if "sheet_url" not in st.session_state:
     st.session_state.sheet_url = ""
 if "__ultima_vista__" not in st.session_state:
     st.session_state["__ultima_vista__"] = None
+# Preferencias de visualización
+if "max_cats_grafico" not in st.session_state:
+    st.session_state.max_cats_grafico = 20   # si hay más categorías, no graficar; mostrar tabla
+if "top_n_grafico" not in st.session_state:
+    st.session_state.top_n_grafico = 20      # Top-N por defecto para barras
 
 # ---------------------------
 # CARGA DE DATOS (CACHE)
@@ -121,10 +126,21 @@ def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
     return schema
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
+    """
+    Devuelve 'torta' | 'barras' | 'linea' | 'table' según la cardinalidad:
+    - Temporal -> línea
+    - ≤6 categorías -> torta
+    - ≤ max_cats_grafico -> barras
+    - > max_cats_grafico -> tabla
+    """
     if pd.api.types.is_datetime64_any_dtype(df[cat_col]) or "fecha" in _norm(cat_col):
         return "linea"
     nunique = df[cat_col].nunique(dropna=False)
-    return "torta" if 2 <= nunique <= 6 else "barras"
+    if nunique <= 6:
+        return "torta"
+    if nunique <= st.session_state.get("max_cats_grafico", 20):
+        return "barras"
+    return "table"
 
 # ---------------------------
 # FORMATO MONETARIO (CLP)
@@ -155,7 +171,7 @@ def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     st.pyplot(fig)
 
-def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None):
+def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (
         df.assign(__v=vals)
@@ -163,6 +179,14 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None):
           .sum()
           .sort_values(ascending=False)
     )
+    # Top‑N (si hay muchas categorías)
+    if top_n is None:
+        top_n = st.session_state.get("top_n_grafico", 20)
+    recorte = False
+    if len(resumen) > top_n:
+        resumen = resumen.head(top_n)
+        recorte = True
+
     fig, ax = plt.subplots()
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
@@ -183,6 +207,8 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None):
             )
     fig.tight_layout()
     st.pyplot(fig)
+    if recorte:
+        st.caption(f"Mostrando Top‑{top_n} categorías por {col_valor}. Usa una tabla si necesitas el detalle completo.")
 
 def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
@@ -376,7 +402,10 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
             return True
 
         if action == "chart":
-            if chart == "barras":
+            # Si la heurística decide 'table' (muchas categorías), renderiza tabla
+            if chart == "table":
+                mostrar_tabla(df, cat_real, val_real, title or f"Tabla: {val_real} por {cat_real}")
+            elif chart == "barras":
                 mostrar_grafico_barras(df, cat_real, val_real, title)
             elif chart == "torta":
                 mostrar_grafico_torta(df, cat_real, val_real, title)
@@ -402,7 +431,8 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
                     fig.autofmt_xdate()
                     st.pyplot(fig)
                 else:
-                    mostrar_grafico_barras(df, cat_real, val_real, title)
+                    # demasiadas categorías no temporales -> tabla
+                    mostrar_tabla(df, cat_real, val_real, title or f"Tabla: {val_real} por {cat_real}")
             else:
                 mostrar_grafico_barras(df, cat_real, val_real, title)
 
@@ -439,6 +469,16 @@ with col1:
                     st.warning("La hoja no tiene datos.")
             except Exception as e:
                 st.error(f"Error conectando Google Sheet: {e}")
+
+    st.markdown("### ⚙️ Preferencias de visualización")
+    st.session_state.max_cats_grafico = st.number_input(
+        "Máx. categorías para graficar", min_value=6, max_value=200,
+        value=st.session_state.max_cats_grafico, step=1
+    )
+    st.session_state.top_n_grafico = st.number_input(
+        "Top‑N por defecto (barras)", min_value=5, max_value=100,
+        value=st.session_state.top_n_grafico, step=1
+    )
 
 data = st.session_state.data
 
@@ -487,7 +527,6 @@ Datos calculados:
                     if "top" in _norm(pregunta) and any(n in _norm(pregunta) for n in ["5","cinco"]):
                         df = st.session_state.data[hoja]
                         resumen = df.groupby(cat)[val].sum().sort_values(ascending=False).head(5).reset_index()
-                        # formatea columna de valores para vista rápida
                         try:
                             resumen[resumen.columns[1]] = resumen[resumen.columns[1]].apply(_fmt_pesos)
                         except Exception:
@@ -515,7 +554,7 @@ Si puedes responder con una tabla o gráfico, incluye UNA instrucción exacta en
 - grafico_torta:col_categoria|col_valor|titulo
 - grafico_barras:col_categoria|col_valor|titulo
 - tabla:col_categoria|col_valor[|titulo]
-Si sólo piden un gráfico sin tipo, elige el más adecuado (barras/torta/línea).
+Si sólo piden un gráfico sin tipo, elige el más adecuado (barras/torta/línea) o tabla si hay demasiadas categorías.
 No expliques el método si puedes entregar el resultado agregado.
 
 Pregunta: {pregunta}
