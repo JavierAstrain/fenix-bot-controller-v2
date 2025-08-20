@@ -106,8 +106,7 @@ def find_col(df: pd.DataFrame, name: str) -> Optional[str]:
             return c
     return None
 
-# alias para planner
-def _find_col(df, name: str) -> Optional[str]:
+def _find_col(df, name: str) -> Optional[str]:  # alias para planner
     return find_col(df, name)
 
 def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -221,10 +220,15 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     )
     resumen.columns = [str(col_categoria).title(), str(col_valor).title()]
     col_val = resumen.columns[1]
-    try:
-        resumen[col_val] = resumen[col_val].apply(_fmt_pesos)
-    except Exception:
-        pass
+
+    # Formateo de valores monetarios
+    resumen[col_val] = resumen[col_val].apply(_fmt_pesos)
+
+    # --- TOTAL al final ---
+    total_val = vals.sum(skipna=True)
+    total_row = pd.DataFrame({resumen.columns[0]: ["TOTAL"], col_val: [_fmt_pesos(total_val)]})
+    resumen = pd.concat([resumen, total_row], ignore_index=True)
+
     st.markdown(f"### 📊 {titulo if titulo else f'{col_val} por {col_categoria}'}")
     st.dataframe(resumen, use_container_width=True)
 
