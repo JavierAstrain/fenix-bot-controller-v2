@@ -89,10 +89,10 @@ def ask_gpt(prompt: str) -> str:
 # NORMALIZACIÓN & UTILIDADES
 # ---------------------------
 def _norm(s: str) -> str:
-    s = str(s).replace("\u00A0", " ").strip()   # NBSP -> espacio
+    s = str(s).replace("\u00A0", " ").strip()
     s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-    s = re.sub(r'\s+', ' ', s).lower()
-    return s
+    s = re.sub(r'\s+', ' ', s)
+    return s.lower()
 
 def find_col(df: pd.DataFrame, name: str) -> Optional[str]:
     tgt = _norm(name)
@@ -127,14 +127,20 @@ def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     return "torta" if 2 <= nunique <= 6 else "barras"
 
 # ---------------------------
-# VISUALIZACIONES (EXCEL-LIKE) — robustas
+# FORMATO MONETARIO (CLP)
 # ---------------------------
-def _fmt_miles(x, pos=None):
+def _fmt_pesos(x, pos=None):
+    """$ con separador de miles (.) y redondeo a entero."""
     try:
-        return f"${int(x):,}".replace(",", ".")
+        if x is None or (isinstance(x, float) and np.isnan(x)):
+            return ""
+        return f"${int(round(x)):,}".replace(",", ".")
     except Exception:
         return str(x)
 
+# ---------------------------
+# VISUALIZACIONES (robustas)
+# ---------------------------
 def mostrar_grafico_torta(df, col_categoria, col_valor, titulo=None):
     vals = pd.to_numeric(df[col_valor], errors="coerce")
     resumen = (
@@ -161,15 +167,15 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None):
     bars = ax.bar(resumen.index.astype(str), resumen.values)
     ax.set_title(titulo or f"{col_valor} por {col_categoria}")
     ax.set_ylabel(col_valor)
-    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_miles))
-    ax.tick_params(axis='x', rotation=45)  # sin 'ha'
+    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
+    ax.tick_params(axis='x', rotation=45)
     for lbl in ax.get_xticklabels():
         lbl.set_ha('right')
     for b in bars:
         y = b.get_height()
         if np.isfinite(y):
             ax.annotate(
-                _fmt_miles(y),
+                _fmt_pesos(y),
                 xy=(b.get_x()+b.get_width()/2, y),
                 xytext=(0, 3),
                 textcoords="offset points",
@@ -190,7 +196,7 @@ def mostrar_tabla(df, col_categoria, col_valor, titulo=None):
     resumen.columns = [str(col_categoria).title(), str(col_valor).title()]
     col_val = resumen.columns[1]
     try:
-        resumen[col_val] = resumen[col_val].astype(float).round(0).astype(int)
+        resumen[col_val] = resumen[col_val].apply(_fmt_pesos)
     except Exception:
         pass
     st.markdown(f"### 📊 {titulo if titulo else f'{col_val} por {col_categoria}'}")
@@ -392,7 +398,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
                     ax.plot(serie.index, serie.values, marker="o")
                     ax.set_title(title or f"{val_real} por tiempo")
                     ax.set_ylabel(val_real)
-                    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_miles))
+                    ax.yaxis.set_major_formatter(mtick.FuncFormatter(_fmt_pesos))
                     fig.autofmt_xdate()
                     st.pyplot(fig)
                 else:
@@ -481,6 +487,11 @@ Datos calculados:
                     if "top" in _norm(pregunta) and any(n in _norm(pregunta) for n in ["5","cinco"]):
                         df = st.session_state.data[hoja]
                         resumen = df.groupby(cat)[val].sum().sort_values(ascending=False).head(5).reset_index()
+                        # formatea columna de valores para vista rápida
+                        try:
+                            resumen[resumen.columns[1]] = resumen[resumen.columns[1]].apply(_fmt_pesos)
+                        except Exception:
+                            pass
                         st.dataframe(resumen, use_container_width=True)
                         st.stop()
 
