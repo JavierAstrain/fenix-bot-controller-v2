@@ -51,11 +51,11 @@ if "sheet_url" not in st.session_state:
     st.session_state.sheet_url = ""
 if "__ultima_vista__" not in st.session_state:
     st.session_state["__ultima_vista__"] = None
-# Preferencias de visualización
+# Preferencias de visualización (ajustables en la UI)
 if "max_cats_grafico" not in st.session_state:
-    st.session_state.max_cats_grafico = 20   # si hay más categorías, no graficar; mostrar tabla
+    st.session_state.max_cats_grafico = 18   # si hay más categorías, no graficar; mostrar tabla
 if "top_n_grafico" not in st.session_state:
-    st.session_state.top_n_grafico = 20      # Top-N por defecto para barras
+    st.session_state.top_n_grafico = 12      # Top-N por defecto para barras (más legible)
 
 # ---------------------------
 # CARGA DE DATOS (CACHE)
@@ -126,19 +126,36 @@ def _build_schema(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _choose_chart_auto(df: pd.DataFrame, cat_col: str, val_col: str) -> str:
     """
-    Devuelve 'torta' | 'barras' | 'linea' | 'table' según la cardinalidad:
-    - Temporal -> línea
+    Devuelve 'torta' | 'barras' | 'linea' | 'table' según cardinalidad y tipo de categoría.
+    - Temporal (fecha/mes) -> línea
+    - Columnas tipo ID (patente, folio, doc, nro, factura, oc, orden, boleta, cotización, presupuesto) -> tabla
     - ≤6 categorías -> torta
     - ≤ max_cats_grafico -> barras
     - > max_cats_grafico -> tabla
     """
-    if pd.api.types.is_datetime64_any_dtype(df[cat_col]) or "fecha" in _norm(cat_col):
+    cat_norm = _norm(cat_col)
+
+    # 1) temporales -> línea
+    if pd.api.types.is_datetime64_any_dtype(df[cat_col]) or "fecha" in cat_norm or "mes" in cat_norm:
         return "linea"
+
+    # 2) identificadores -> tabla (gráfico poco útil)
+    id_hints = ["patente", "folio", "nro", "numero", "número", "doc", "documento",
+                "factura", "boleta", "oc", "orden", "presupuesto", "cotizacion", "cotización"]
+    if any(h in cat_norm for h in id_hints):
+        return "table"
+
     nunique = df[cat_col].nunique(dropna=False)
+
+    # 3) pocas categorías -> torta
     if nunique <= 6:
         return "torta"
-    if nunique <= st.session_state.get("max_cats_grafico", 20):
+
+    # 4) rango medio -> barras si no excede umbral general
+    if nunique <= st.session_state.get("max_cats_grafico", 18):
         return "barras"
+
+    # 5) muchas categorías -> tabla
     return "table"
 
 # ---------------------------
@@ -178,9 +195,22 @@ def mostrar_grafico_barras(df, col_categoria, col_valor, titulo=None, top_n=None
           .sum()
           .sort_values(ascending=False)
     )
+
+    # --- chequeo de outliers: si max > 3*mediana -> mejor TABLA ---
+    try:
+        if len(resumen) >= 8:
+            top_val = float(resumen.iloc[0])
+            med_val = float(np.median(resumen.values))
+            if med_val > 0 and top_val / med_val >= 3.0:
+                st.info("Distribución muy desbalanceada: mostrando tabla en lugar de barras para mejor lectura.")
+                mostrar_tabla(df, col_categoria, col_valor, titulo)
+                return
+    except Exception:
+        pass
+
     # Top‑N (si hay muchas categorías)
     if top_n is None:
-        top_n = st.session_state.get("top_n_grafico", 20)
+        top_n = st.session_state.get("top_n_grafico", 12)
     recorte = False
     if len(resumen) > top_n:
         resumen = resumen.head(top_n)
@@ -330,6 +360,7 @@ Devuélveme SOLO un JSON (sin explicaciones) con la mejor acción para responder
 Reglas:
 - Usa NOMBRES EXACTOS del esquema (insensible a mayúsculas).
 - Si piden “por …”, úsalo como categoría.
+- Si la categoría es un identificador (patente, folio, nº documento, factura, orden, OC, etc.), prefiere "action":"table".
 - Si no se indica tipo de gráfico, usa "chart":"auto".
 - Si dudas del valor, usa monto/importe/neto/total.
 - Si es puramente textual, usa "action":"text".
@@ -406,7 +437,7 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
             return True
 
         if action == "chart":
-            # Si la heurística decide 'table' (muchas categorías), renderiza tabla
+            # Si la heurística decide 'table' (IDs o demasiadas categorías) -> tabla
             if chart == "table":
                 mostrar_tabla(df, cat_real, val_real, title or f"Tabla: {val_real} por {cat_real}")
             elif chart == "barras":
@@ -435,7 +466,6 @@ def execute_plan(plan: Dict[str, Any], data: Dict[str, Any]) -> bool:
                     fig.autofmt_xdate()
                     st.pyplot(fig)
                 else:
-                    # demasiadas categorías no temporales -> tabla
                     mostrar_tabla(df, cat_real, val_real, title or f"Tabla: {val_real} por {cat_real}")
             else:
                 mostrar_grafico_barras(df, cat_real, val_real, title)
@@ -528,9 +558,11 @@ Datos calculados:
                 last = st.session_state.get("__ultima_vista__")
                 if last:
                     hoja = last["sheet"]; cat = last["cat"]; val = last["val"]
-                    if "top" in _norm(pregunta) and any(n in _norm(pregunta) for n in ["5","cinco"]):
+                    if "top" in _norm(pregunta) and any(n in _norm(pregunta) for n in ["10","diez","5","cinco"]):
                         df = st.session_state.data[hoja]
-                        resumen = df.groupby(cat)[val].sum().sort_values(ascending=False).head(5).reset_index()
+                        resumen = df.groupby(cat)[val].sum().sort_values(ascending=False).head(
+                            st.session_state.get("top_n_grafico", 12)
+                        ).reset_index()
                         try:
                             resumen[resumen.columns[1]] = resumen[resumen.columns[1]].apply(_fmt_pesos)
                         except Exception:
